@@ -1,0 +1,28 @@
+{
+    "name": "augustash/ddev-wordpress",
+    "description": "AugustAsh ddev installer.",
+    "type": "library",
+    "license": "MIT",
+    "require": {
+        "php": ">=7",
+        "symfony/yaml": "^4",
+        "symfony/filesystem": "^4"
+    },
+    "extra": {
+        "drupal-scaffold": {
+            "file-mapping": {
+              "[project-root]/.ddev/providers/pantheon.yaml": "assets/providers/pantheon.yaml",
+              "[project-root]/.ddev/config.yaml": {
+                  "mode": "replace",
+                  "path": "assets/config.yaml",
+                  "overwrite": false
+              }
+            }
+        }
+    },
+    "autoload": {
+      "psr-4": {
+        "Augustash\\": "src/"
+      }
+    }
+}
