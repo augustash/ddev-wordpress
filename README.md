@@ -22,10 +22,7 @@ On ddev-setup, you will be prompted for:
   - Client code
   - Pantheon site name
   - Pantheon site environment
-  - Drupal version
   - PHP version
-  - Solr support
-  - wkhtmltopdf support
 
 These are used to set config.yaml ddev configuration.
 
