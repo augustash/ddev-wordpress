@@ -3,10 +3,17 @@
     "description": "AugustAsh ddev installer.",
     "type": "library",
     "license": "MIT",
+    "repositories": [
+        {
+          "type": "composer",
+          "url": "https://packages.drupal.org/8"
+        },
+    ],
     "require": {
         "php": ">=7",
         "symfony/yaml": "^4",
-        "symfony/filesystem": "^4"
+        "symfony/filesystem": "^4",
+        "drupal/core-composer-scaffold": "^9"
     },
     "extra": {
         "drupal-scaffold": {
