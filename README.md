@@ -4,6 +4,13 @@ Set the following to root composer.json:
 
 Root level:
 ```
+"extra": {
+    "drupal-scaffold": {
+        "allowed-packages": [
+            "augustash/ddev-wordpress"
+        ]
+    }
+},
 "scripts": {
     "ddev-setup": "Augustash\\Ddev::postPackageInstall"
 }
