@@ -5,9 +5,9 @@
     "license": "MIT",
     "repositories": [
         {
-          "type": "composer",
-          "url": "https://packages.drupal.org/8"
-        },
+            "type": "composer",
+            "url": "https://packages.drupal.org/8"
+        }
     ],
     "require": {
         "php": ">=7",
@@ -18,18 +18,18 @@
     "extra": {
         "drupal-scaffold": {
             "file-mapping": {
-              "[project-root]/.ddev/providers/pantheon.yaml": "assets/providers/pantheon.yaml",
-              "[project-root]/.ddev/config.yaml": {
-                  "mode": "replace",
-                  "path": "assets/config.yaml",
-                  "overwrite": false
-              }
+                "[project-root]/.ddev/providers/pantheon.yaml": "assets/providers/pantheon.yaml",
+                "[project-root]/.ddev/config.yaml": {
+                    "mode": "replace",
+                    "path": "assets/config.yaml",
+                    "overwrite": false
+                }
             }
         }
     },
     "autoload": {
-      "psr-4": {
-        "Augustash\\": "src/"
-      }
+        "psr-4": {
+          "Augustash\\": "src/"
+        }
     }
 }
