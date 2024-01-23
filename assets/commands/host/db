@@ -7,7 +7,7 @@
 # Check if any tables exist in database.
 # If not, pull database.
 
-if [[ ! $(ddev wp cli db "USE db; SHOW tables;") ]]; then
+if [[ ! $(ddev wp db query "USE db; SHOW tables;") ]]; then
   echo 'No database is installed, pulling.'
   ddev auth ssh
   ddev pull pantheon --skip-files -y
