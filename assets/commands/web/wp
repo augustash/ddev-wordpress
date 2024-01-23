@@ -1,0 +1,14 @@
+#!/bin/bash
+
+#ddev-generated
+## Description: Run wp CLI inside the web container
+## Usage: wp [flags] [args]
+## Example: "ddev wp uli" or "ddev wp sql-cli" or "ddev wp --version"
+## ProjectTypes: wordpress
+## ExecRaw: true
+
+if ! command -v wp >/dev/null; then
+  echo "wp is not available. You may need to 'ddev composer require wp-cli/wp-cli'"
+  exit 1
+fi
+wp "$@"
