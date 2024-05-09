@@ -16,6 +16,26 @@ db_pull_command:
     connection=${connection/'mysql'/'mysqldump -v'}
     eval "$connection --single-transaction --default-character-set=utf8mb4 --quick | gzip > db.sql.gz"
 
+files_pull_command:
+  command: |
+    NORM=`tput sgr0`
+    BOLD=`tput bold`
+    REV=`tput smso`
+    # set -x   # You can enable bash debugging output by uncommenting
+    set -eu -o pipefail
+    ls /var/www/html/.ddev >/dev/null # This just refreshes stale NFS if possible
+    pushd /var/www/html/.ddev/.downloads >/dev/null;
+    PANTHEON_SITE=${project}
+    IFS='.' read -a PANTHEON_PARTS <<< ${PANTHEON_SITE}
+    PANTHEON_ID=${PANTHEON_PARTS[0]:-"$PANTHEON_ID"}
+    PANTHEON_ENV=${PANTHEON_PARTS[1]:-"$PANTHEON_ENV"}
+    PANTHEON_INFO="$(terminus site:info $PANTHEON_ID --format=tsv)"
+    PANTHEON_ARRAY=( $PANTHEON_INFO )
+    PANTHEON_UUID=${PANTHEON_ARRAY[0]}
+    echo "${BOLD}Downloading files from Pantheon...${NORM}"
+    rsync -rLvz --copy-unsafe-links --size-only --ipv4 --progress --exclude="/php" --exclude="/styles" --exclude="/css" --exclude="/js" --exclude="/webform" --include="*/" --include="*.jpg" --include="*.jpeg" --include="*.gif" --include="*.png" --include="*.svg" --include="*.eot" --include="*.ttf" --include="*.woff" --include="*.woff2" --include="*.json" --include="*.css" --include="/exo-file/*" --exclude="*" -e 'ssh -p 2222' "$PANTHEON_ENV.$PANTHEON_UUID@appserver.$PANTHEON_ENV.$PANTHEON_UUID.drush.in:files/" /var/www/html/wp-content/uploads
+
+
 files_import_command:
   command: |
     # Do nothing. Files have already been merged.
