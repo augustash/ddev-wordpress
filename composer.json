@@ -26,6 +26,7 @@
                 "[project-root]/.ddev/commands/web/php": "assets/commands/web/php",
                 "[project-root]/.ddev/commands/web/wp": "assets/commands/web/wp",
                 "[project-root]/.ddev/providers/pantheon.yaml": "assets/providers/pantheon.yaml",
+                "[project-root]/.ddev/homeadditions/.bash_aliases": "assets/homeadditions/.bash_aliases",
                 "[project-root]/.ddev/config.yaml": {
                     "mode": "replace",
                     "path": "assets/config.yaml",
