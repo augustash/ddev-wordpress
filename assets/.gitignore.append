@@ -1,7 +1,6 @@
 # Ignore ddev files
 /.ddev/.DS_Store
 /.ddev/commands
-/.ddev/providers
 /.ddev/assets
 /.ddev/docker-compose.local.yaml
 /auth.json

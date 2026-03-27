@@ -35,9 +35,9 @@ These are used to set config.yaml ddev configuration.
 
 # Database
 
-Database will be downloaded automatically, this is handled in /.ddev/commands/host/db.
-  Will not download if there are tables in the existing local db.
+Database pull is handled by the [ddev-pantheon-db](https://github.com/augustash/ddev-pantheon-db) add-on, which is automatically installed on `ddev start`.
 
-# TODO:
+Will not download if there is more than one table in the existing local db.
 
-Nothing currently.
+To force a fresh pull:
+  `ddev db -f`

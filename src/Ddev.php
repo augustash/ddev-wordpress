@@ -70,7 +70,8 @@ class Ddev {
       $config['type'] = 'wordpress';
       $config['php_version'] = $phpVersions[$phpVersion];
       $config['web_environment'] = [
-        'project=' . $siteName . '.' . $siteEnv,
+        'DDEV_PANTHEON_SITE=' . $siteName,
+        'DDEV_PANTHEON_ENVIRONMENT=' . $siteEnv,
       ];
 
       // Subdomain configuration handling.
