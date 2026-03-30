@@ -48,6 +48,7 @@ class Ddev {
   public static function postPackageInstall(Event $event) {
 
     static::syncConfig();
+    static::cleanup();
 
     $fileSystem = new Filesystem();
     if ($fileSystem->exists(static::$configPath)) {
@@ -149,6 +150,21 @@ class Ddev {
     if (!empty($missing)) {
       $siteConfig = array_merge($siteConfig, $missing);
       $fileSystem->dumpFile(static::$configPath, Yaml::dump($siteConfig, 2, 2));
+    }
+  }
+
+  /**
+   * Remove legacy commands that have moved to plugins.
+   */
+  protected static function cleanup() {
+    $fileSystem = new Filesystem();
+    $dbCommand = static::$ddevRoot . 'commands/host/db';
+
+    if ($fileSystem->exists($dbCommand)) {
+      $contents = file_get_contents($dbCommand);
+      if (strpos($contents, '#ddev-generated') === FALSE) {
+        $fileSystem->remove($dbCommand);
+      }
     }
   }
 
