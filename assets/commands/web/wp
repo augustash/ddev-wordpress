@@ -1,6 +1,5 @@
 #!/bin/bash
 
-#ddev-generated
 ## Description: Run wp CLI inside the web container
 ## Usage: wp [flags] [args]
 ## Example: "ddev wp uli" or "ddev wp sql-cli" or "ddev wp --version"
