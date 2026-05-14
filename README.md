@@ -1,27 +1,10 @@
 # Setup
 
-Set the following to root composer.json:
-
-Root level:
 ```
-"extra": {
-    "drupal-scaffold": {
-        "allowed-packages": [
-            "augustash/ddev-wordpress"
-        ]
-    }
-},
-"scripts": {
-    "ddev-setup": "Augustash\\Ddev::postPackageInstall"
-}
+ddev composer config extra.drupal-scaffold.allowed-packages --json '["augustash/ddev-wordpress"]' && ddev composer config scripts.ddev-setup 'Augustash\\Ddev::postPackageInstall' && ddev composer require augustash/ddev-wordpress && ddev composer ddev-setup
 ```
 
-Run:
-```
-composer require augustash/ddev-wordpress && composer ddev-setup
-```
-
-Composer install will trigger configuration script, follow prompts.
+Follow the prompts to complete configuration.
 
 # Configuration
 
