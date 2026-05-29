@@ -1,12 +1,8 @@
 name:
-type: drupal9
+type: wordpress
 docroot:
 database:
   type: mariadb
   version: "10.5"
 mutagen_enabled: true
 webimage_extra_packages: [build-essential, libnotify-bin]
-hooks:
-  post-start:
-    - exec-host: ddev add-on get augustash/ddev-pantheon-db
-    - exec-host: ddev db
