@@ -1,10 +1,30 @@
 # Setup
 
 ```
-ddev composer config extra.drupal-scaffold.allowed-packages --json '["augustash/ddev-wordpress"]' && ddev composer config scripts.ddev-setup 'Augustash\Ddev::postPackageInstall' && ddev composer config --json --merge scripts.post-update-cmd '["Augustash\\Ddev::postUpdate"]' && ddev composer require augustash/ddev-wordpress && ddev composer ddev-setup
+ddev composer config extra.drupal-scaffold.allowed-packages --json '["augustash/ddev-wordpress"]' && ddev composer config scripts.ddev-setup 'Augustash\Ddev::postPackageInstall' && ddev composer config scripts.post-update-cmd 'Augustash\Ddev::postUpdate' && ddev composer require augustash/ddev-wordpress && ddev composer ddev-setup
 ```
 
 Follow the prompts to complete configuration.
+
+> **Why scalar `composer config`, not `--json`?** The two script values contain
+> backslashes (the `Augustash\Ddev` namespace separator). Passing them as inline
+> JSON through `ddev composer config --json '[...]'` lets the double shell (host →
+> container) eat the backslashes, so Composer stores the value as a quoted *string*
+> — `"[\"Augustash\\Ddev::postUpdate\"]"` — instead of an array. The next
+> `composer update` then fails with `Class "[\"Augustash\Ddev ... is not autoloadable`.
+> The scalar form above sidesteps it: a single hook is a valid scalar script value.
+> (The `allowed-packages` line keeps `--json` safely — it has no backslashes.)
+>
+> **Already have a `post-update-cmd`?** (e.g. a Pantheon
+> `DrupalComposerManaged\ComposerScripts::postUpdate` hook) the scalar command
+> *replaces* it. Skip that one segment and instead add `Augustash\Ddev::postUpdate`
+> to the existing array by editing `composer.json` directly, so both hooks run:
+> ```json
+> "post-update-cmd": [
+>     "DrupalComposerManaged\\ComposerScripts::postUpdate",
+>     "Augustash\\Ddev::postUpdate"
+> ]
+> ```
 
 # Updating
 
