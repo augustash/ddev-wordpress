@@ -1,10 +1,26 @@
 # Setup
 
 ```
-ddev composer config extra.drupal-scaffold.allowed-packages --json '["augustash/ddev-wordpress"]' && ddev composer config scripts.ddev-setup 'Augustash\Ddev::postPackageInstall' && ddev composer require augustash/ddev-wordpress && ddev composer ddev-setup
+ddev composer config extra.drupal-scaffold.allowed-packages --json '["augustash/ddev-wordpress"]' && ddev composer config scripts.ddev-setup 'Augustash\Ddev::postPackageInstall' && ddev composer config --json --merge scripts.post-update-cmd '["Augustash\\Ddev::postUpdate"]' && ddev composer require augustash/ddev-wordpress && ddev composer ddev-setup
 ```
 
 Follow the prompts to complete configuration.
+
+# Updating
+
+To pull the latest `ddev-wordpress` and refresh the generated scaffolding and
+hooks **without re-answering the setup prompts**, re-run setup in update mode
+(`-u`):
+```bash
+ddev composer require augustash/ddev-wordpress && ddev composer ddev-setup -- -u
+```
+Update mode keeps your existing `config.yaml` values (client code, PHP version,
+subdomains) and only rebuilds what may have changed — BrowserSync, the Terminus
+image, and the Pantheon add-on hook (upgraded in place to track `develop`). Run
+`ddev restart` afterward to rebuild the containers and re-pull add-ons.
+
+Omit `-u` to be re-prompted for the configuration values (the original setup
+flow).
 
 # Configuration
 
