@@ -1,0 +1,7 @@
+.DS_Store
+/.vscode
+/vendor
+/composer.lock
+/.phpunit.cache
+/autoload.php
+/.ddev
