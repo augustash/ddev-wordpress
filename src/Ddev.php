@@ -101,6 +101,12 @@ class Ddev {
    *   When TRUE, skip prompts and refresh in place from the existing config.
    */
   protected static function run(Event $event, $update) {
+    // postUpdate fires this on every `composer update`, so most runs are no-ops
+    // that rewrite the scaffolding byte-for-byte. Fingerprint the managed files
+    // up front (update mode only) so the restart prompt at the end fires only
+    // when something that actually lands in the containers changed.
+    $before = $update ? static::fingerprint() : NULL;
+
     static::syncConfig();
     static::cleanup();
 
@@ -144,10 +150,11 @@ class Ddev {
     static::appendGitignore($event);
     static::copyBrowsersync($event);
 
-    if ($update) {
-      // The add-on pull and container rebuilds happen on the host at start,
-      // which this in-container script can't trigger. Prompt a restart so the
-      // post-start hooks (e.g. ddev add-on get) re-run.
+    if ($update && static::fingerprint() !== $before) {
+      // Something changed. The add-on pull and container rebuilds happen on the
+      // host at start, which this in-container script can't trigger, so prompt a
+      // restart to re-run the post-start hooks (e.g. ddev add-on get). When the
+      // refresh was a no-op (fingerprint unchanged) we stay silent.
       $io->write('');
       $io->write('<info>Scaffolding refreshed.</info> Run <comment>ddev restart</comment> to rebuild the containers and re-pull add-ons (e.g. ddev-pantheon-db).');
       $io->write('');
@@ -587,6 +594,74 @@ class Ddev {
     } else {
       $fileSystem->remove(static::$ddevRoot . 'web-build/Dockerfile.ddev-terminus');
     }
+  }
+
+  /**
+   * Hash the contents of every file the scaffolding run manages.
+   *
+   * Taken before and after run() in update mode to tell a real refresh from a
+   * no-op: postUpdate fires on every `composer update`, and prompting for a
+   * restart when nothing changed is just misleading noise. Hashing file
+   * *contents* (not mtimes) means the unconditional copies/dumps the run
+   * performs don't register as changes when the bytes are identical.
+   *
+   * @return string
+   *   A content hash of the managed file set, stable across no-op runs.
+   */
+  protected static function fingerprint() {
+    // WordPress has no docroot; wp-config.php sits at the project root.
+    $projectRoot = __DIR__ . '/../../../../';
+
+    $paths = [
+      static::$configPath,
+      static::$gitIgnorePath,
+      $projectRoot . static::$settingsLocalPath,
+      static::$ddevRoot . 'docker-compose.browsersync.yaml',
+      static::$ddevRoot . 'web-build/Dockerfile.ddev-terminus',
+      static::$ddevRoot . 'commands/host/db',
+    ];
+
+    $parts = [];
+    foreach ($paths as $path) {
+      $parts[] = $path . ':' . static::hashPath($path);
+    }
+    return md5(implode('|', $parts));
+  }
+
+  /**
+   * Content hash of a file, or of an entire directory tree, or '' if absent.
+   *
+   * Directory entries are sorted before hashing so the result is independent
+   * of filesystem iteration order.
+   *
+   * @param string $path
+   *   A file or directory path.
+   *
+   * @return string
+   *   A stable hash of the path's contents, or '' when it does not exist.
+   */
+  protected static function hashPath($path) {
+    if (is_file($path)) {
+      return md5_file($path);
+    }
+    if (!is_dir($path)) {
+      return '';
+    }
+    $hashes = [];
+    $iterator = new \RecursiveIteratorIterator(
+      new \RecursiveDirectoryIterator($path, \FilesystemIterator::SKIP_DOTS)
+    );
+    foreach ($iterator as $file) {
+      if ($file->isFile()) {
+        $hashes[$file->getPathname()] = md5_file($file->getPathname());
+      }
+    }
+    ksort($hashes);
+    $parts = [];
+    foreach ($hashes as $file => $hash) {
+      $parts[] = $file . ':' . $hash;
+    }
+    return md5(implode('|', $parts));
   }
 
 }
