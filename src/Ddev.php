@@ -147,6 +147,7 @@ class Ddev {
 
     static::writeConfig($event, $config);
     static::writeSettingsLocal($event);
+    static::applyWpEngineFixups($event);
     static::appendGitignore($event);
     static::copyBrowsersync($event);
 
@@ -355,6 +356,185 @@ class Ddev {
   }
 
   /**
+   * Detect whether a wp-config.php describes a WP Engine-hosted site.
+   *
+   * WP Engine seeds every install's wp-config.php with a block of platform
+   * constants; unlike Pantheon (whose marker lives in ddev env vars) the WPE
+   * signal lives in the config file itself. Any one of these constants is a
+   * reliable tell — WPE_APIKEY and WPE_CLUSTER_ID are always present, PWP_NAME
+   * carries the install name and is a useful secondary anchor.
+   *
+   * @param string $wpConfig
+   *   Absolute path to the site's wp-config.php.
+   *
+   * @return bool
+   *   TRUE when the file carries WP Engine platform constants.
+   */
+  protected static function isWpEngineSite($wpConfig) {
+    if (!is_readable($wpConfig)) {
+      return FALSE;
+    }
+    $contents = file_get_contents($wpConfig);
+    return (bool) preg_match(
+      "/define\\(\\s*'(WPE_APIKEY|WPE_CLUSTER_ID|PWP_NAME)'/",
+      $contents
+    );
+  }
+
+  /**
+   * Gate a WP Engine wp-config.php so ddev's database settings win locally.
+   *
+   * WP Engine's wp-config.php hard-defines the production DB credentials with
+   * bare define()s and ships no local-override hook, so under ddev the prod
+   * creds win and the container can't reach its own database. This applies the
+   * two edits — idempotently, keyed on sentinels — that let ddev take over
+   * inside the container while leaving production untouched:
+   *
+   * 1. Wrap the contiguous run of DB_* defines in an `IS_DDEV_PROJECT !== 'true'`
+   *    guard, so the prod credentials simply don't run under ddev. We wrap the
+   *    whole run (keyed on the DB_ prefix, tolerating blank/comment lines) rather
+   *    than a fixed set, because the optional DB_HOST_SLAVE/DB_CHARSET/DB_COLLATE
+   *    vary between installs.
+   * 2. Insert the wp-config-ddev.php include immediately before the
+   *    `wp-settings.php` require — the one line every wp-config.php must have, so
+   *    it's a stable anchor regardless of what platform mods sit above it. Its
+   *    `!defined('DB_USER')` guard means it only loads ddev's creds when the wrap
+   *    above suppressed the prod ones, i.e. under ddev.
+   *
+   * Both edits are inert in production: the wrap's guard is false off-ddev, and
+   * the include's is_readable()/!defined() guards skip it when the prod creds
+   * are present. Re-running is a no-op once the sentinels are in place, so a
+   * re-seed from production self-heals on the next scaffolding pass.
+   *
+   * @param string $wpConfig
+   *   Absolute path to the site's wp-config.php.
+   *
+   * @return bool
+   *   TRUE when the file was modified, FALSE when already gated or unwritable.
+   */
+  protected static function applyWpEngineDbGate($wpConfig) {
+    if (!is_readable($wpConfig) || !is_writable($wpConfig)) {
+      return FALSE;
+    }
+    $contents = file_get_contents($wpConfig);
+    $original = $contents;
+
+    $contents = static::wrapDbDefines($contents);
+    $contents = static::insertDdevInclude($contents);
+
+    if ($contents === $original) {
+      return FALSE;
+    }
+    (new Filesystem())->dumpFile($wpConfig, $contents);
+    return TRUE;
+  }
+
+  /**
+   * Wrap the contiguous run of DB_* defines in an IS_DDEV_PROJECT guard.
+   *
+   * Finds the first `define('DB_...')`, extends through the consecutive run of
+   * DB_ defines (tolerating blank lines and comment lines between them), and
+   * wraps that span so the production credentials are skipped under ddev.
+   * Idempotent: if the DB_NAME define already sits inside an IS_DDEV_PROJECT
+   * guard the contents are returned unchanged.
+   *
+   * @param string $contents
+   *   The wp-config.php contents.
+   *
+   * @return string
+   *   The contents with the DB block wrapped, or unchanged if already wrapped.
+   */
+  protected static function wrapDbDefines($contents) {
+    $lines = explode("\n", $contents);
+
+    // Locate the DB_* define run.
+    $start = NULL;
+    $end = NULL;
+    foreach ($lines as $i => $line) {
+      if (preg_match("/^\\s*define\\(\\s*'DB_[A-Z_]+'/", $line)) {
+        if ($start === NULL) {
+          $start = $i;
+        }
+        $end = $i;
+        continue;
+      }
+      // Once the run has started, allow blank/comment lines to sit within it;
+      // any other non-DB line ends the run.
+      if ($start !== NULL && trim($line) !== '' && !preg_match('/^\\s*(#|\\/\\/)/', $line)) {
+        break;
+      }
+    }
+    if ($start === NULL) {
+      return $contents;
+    }
+
+    // Already wrapped? The line immediately above the run opening the guard is
+    // our sentinel — bail so re-runs are no-ops (and hand edits are respected).
+    for ($j = $start - 1; $j >= 0; $j--) {
+      if (trim($lines[$j]) === '') {
+        continue;
+      }
+      if (strpos($lines[$j], 'IS_DDEV_PROJECT') !== FALSE) {
+        return $contents;
+      }
+      break;
+    }
+
+    // Indent the wrapped run one level and fence it with the guard.
+    $block = array_slice($lines, $start, $end - $start + 1);
+    $indented = array_map(
+      function ($line) {
+        return $line === '' ? '' : '  ' . $line;
+      },
+      $block
+    );
+    $wrapped = array_merge(
+      ["if ( getenv( 'IS_DDEV_PROJECT' ) !== 'true' ) {"],
+      $indented,
+      ['}']
+    );
+    array_splice($lines, $start, $end - $start + 1, $wrapped);
+
+    return implode("\n", $lines);
+  }
+
+  /**
+   * Insert the wp-config-ddev.php include before the wp-settings.php require.
+   *
+   * Idempotent: if the file already requires wp-config-ddev.php the contents are
+   * returned unchanged. Anchors on the `wp-settings.php` require — the single
+   * line every wp-config.php must contain — so the include lands late enough to
+   * follow any platform setup but before WordPress boots.
+   *
+   * @param string $contents
+   *   The wp-config.php contents.
+   *
+   * @return string
+   *   The contents with the include inserted, or unchanged if already present
+   *   or no wp-settings.php anchor was found.
+   */
+  protected static function insertDdevInclude($contents) {
+    if (strpos($contents, 'wp-config-ddev.php') !== FALSE) {
+      return $contents;
+    }
+    $block = "// Include for ddev-managed settings in wp-config-ddev.php.\n"
+      . "\$ddev_settings = dirname(__FILE__) . '/wp-config-ddev.php';\n"
+      . "if (is_readable(\$ddev_settings) && !defined('DB_USER')) {\n"
+      . "  require_once(\$ddev_settings);\n"
+      . "}\n\n";
+
+    $count = 0;
+    $result = preg_replace(
+      "/^(\\s*require_once[ (].*wp-settings\\.php.*)$/m",
+      $block . '$1',
+      $contents,
+      1,
+      $count
+    );
+    return $count ? $result : $contents;
+  }
+
+  /**
    * Prompt for and apply additional subdomain hostnames.
    *
    * @return array
@@ -400,6 +580,97 @@ class Ddev {
     catch (\Error $e) {
       $event->getIO()->error('<error>' . $e->getMessage() . '</error>');
     }
+  }
+
+  /**
+   * Apply the WP Engine-specific ddev fixups.
+   *
+   * WP Engine sites need two things a stock ddev WordPress setup doesn't
+   * provide, both keyed on the same detection:
+   *
+   * 1. wp-config.php gated so ddev's DB credentials win locally — complements
+   *    writeSettingsLocal() (which only seeds a config when none exists) by
+   *    handling the case where one already exists, seeded from production, and
+   *    hard-defines the prod DB credentials.
+   * 2. .ddev/ un-ignored — WP Engine repos track wp-content only, ignoring the
+   *    doc root wholesale with a `/*` deny-all. That swallows .ddev/ too, so
+   *    without this a fresh clone gets no ddev config at all.
+   *
+   * Detection is self-guarding and each fixup is idempotent, so this runs
+   * unconditionally on every pass — a non-WPE site is left untouched, and an
+   * already-fixed repo is a no-op.
+   */
+  protected static function applyWpEngineFixups(Event $event) {
+    // run() executes in the web container where cwd is the project root, but
+    // resolve against the package location so the path holds regardless of cwd
+    // (matching how fingerprint() reaches wp-config.php).
+    $wpConfig = __DIR__ . '/../../../../' . static::$settingsLocalPath;
+    if (!static::isWpEngineSite($wpConfig)) {
+      return;
+    }
+    if (static::applyWpEngineDbGate($wpConfig)) {
+      $event->getIO()->info('<info>WP Engine wp-config.php gated for ddev.</info>');
+    }
+    if (static::unignoreDdevDir()) {
+      $event->getIO()->info('<info>WP Engine .gitignore updated to track .ddev/.</info>');
+    }
+  }
+
+  /**
+   * Un-ignore .ddev/ in a WP Engine project's `/*` deny-all .gitignore.
+   *
+   * WP Engine repos ignore the doc root wholesale (`/*`) and re-include only a
+   * short allowlist (`!/wp-content/`, etc.), which leaves .ddev/ ignored. Add
+   * .ddev/ to that allowlist so the ddev config commits and a fresh clone comes
+   * up configured. DDEV's own generated .ddev/.gitignore still excludes the
+   * machine-specific files within, so only the shareable config is tracked.
+   *
+   * Surgical and idempotent: only acts when a `/*` deny-all is present and
+   * .ddev/ isn't already un-ignored, and inserts the rules right after the
+   * existing allowlist so they read as part of it.
+   *
+   * @return bool
+   *   TRUE when the .gitignore was modified, FALSE when already correct, not a
+   *   `/*` deny-all repo, or unreadable.
+   */
+  protected static function unignoreDdevDir() {
+    $fileSystem = new Filesystem();
+    if (!$fileSystem->exists(static::$gitIgnorePath)) {
+      return FALSE;
+    }
+    $gitignore = file_get_contents(static::$gitIgnorePath);
+
+    // Only relevant to the WPE `/*` deny-all convention; a normal .gitignore
+    // has no root wildcard to override, so there's nothing to un-ignore.
+    if (!preg_match('/^\s*\/\*\s*$/m', $gitignore)) {
+      return FALSE;
+    }
+    // Already un-ignored (sentinel: an un-ignore rule naming .ddev)?
+    if (preg_match('/^\s*!\/?\.ddev\b/m', $gitignore)) {
+      return FALSE;
+    }
+
+    $rules = "!/.ddev/\n!/.ddev/**\n";
+
+    // Insert directly after the last existing `!` allowlist entry so the new
+    // rules sit with their kin, contiguous — no blank line inserted between the
+    // last allowlist entry and ours. Fall back to appending if none is found.
+    if (preg_match_all('/^\s*!.*\n?/m', $gitignore, $m, PREG_OFFSET_CAPTURE)) {
+      $last = end($m[0]);
+      // Offset just past the matched line (including its trailing newline).
+      $insertAt = $last[1] + strlen($last[0]);
+      // Guard against a match that didn't capture the newline (EOF line).
+      if (substr($gitignore, $insertAt - 1, 1) !== "\n") {
+        $rules = "\n" . $rules;
+      }
+      $gitignore = substr($gitignore, 0, $insertAt) . $rules . substr($gitignore, $insertAt);
+    }
+    else {
+      $gitignore = rtrim($gitignore, "\n") . "\n" . $rules;
+    }
+
+    $fileSystem->dumpFile(static::$gitIgnorePath, $gitignore);
+    return TRUE;
   }
 
   /**
