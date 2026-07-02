@@ -1,0 +1,18 @@
+# wpe-targets — maps each WP Engine git remote to its SSH gateway, so the
+# pre-push hook can version-check the deploy against the live server.
+#
+# One line per environment (whitespace-separated):
+#
+#   <remote-url-substring>   <ssh-gateway-host>                         <install-name>
+#
+# The substring just has to uniquely match the remote URL. Example:
+#
+#   production/myprod    myprod@myprod.ssh.wpengine.net      myprod
+#   production/mystage   mystage@mystage.ssh.wpengine.net    mystage
+#
+# Find your install names + gateway hosts:
+#   ssh -T git@git.wpengine.com          (lists installs your key can reach)
+#   WP Engine portal → each environment's Overview (SSH gateway string)
+#
+# Until you add a line here, the pre-push version-drift check is skipped
+# (the file-type check still runs). This file is yours — it is not overwritten.

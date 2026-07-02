@@ -1,0 +1,70 @@
+#!/usr/bin/env bash
+# ddev-wordpress-generated — managed by augustash/ddev-wordpress; overwritten on
+# composer update. Remove this line to take ownership and stop updates.
+#
+# wpe-file-check — catch files WP Engine's git push rejects, BEFORE pushing.
+#
+# WPE's server-side pre-receive hook refuses executables and video (its
+# "system/large file types" rule). A server rejection is a slow round-trip,
+# so we check locally first. Common trigger: a new plugin ships a bundled
+# binary (a Windows .exe, a sample .mp4) that gets committed with it.
+#
+#   wpe-file-check          detect only — exit 2 if any blocked file is tracked
+#   wpe-file-check --fix     untrack the blocked files + add their patterns to
+#                            .gitignore, then tell you to review and commit
+#
+# Blocked extensions live in BLOCKED_EXT below — edit if WPE flags a new type.
+# Large files are surfaced as a NON-blocking heads-up (WPE's size limit varies).
+#
+set -uo pipefail
+
+# Executables + video. These are what WPE has been observed to reject.
+BLOCKED_EXT='exe|dll|bat|cmd|com|msi|scr|mp4|mov|avi|wmv|mkv|webm|flv|m4v'
+# Files bigger than this (KB) get a heads-up, not a block.
+WARN_KB=25000
+
+REPO="$(git rev-parse --show-toplevel)" || exit 1
+cd "$REPO" || exit 1
+mode="${1:-check}"
+
+blocked="$(git ls-files | grep -iE "\.(${BLOCKED_EXT})\$" || true)"
+
+# ---- --fix: untrack the offenders and make sure the patterns are ignored ----
+if [ "$mode" = "--fix" ]; then
+  if [ -z "$blocked" ]; then
+    echo "wpe-file-check: nothing to fix — no blocked file types tracked."
+    exit 0
+  fi
+  echo "Untracking blocked files (kept on disk; they stay on the server):"
+  printf '%s\n' "$blocked" | while IFS= read -r f; do
+    [ -n "$f" ] || continue
+    git rm --cached --quiet -- "$f" && echo "  - $f"
+  done
+  # Ensure a *.ext ignore exists for each offending extension.
+  exts="$(printf '%s\n' "$blocked" | sed -nE 's/.*\.([^.]+)$/\1/p' | tr 'A-Z' 'a-z' | sort -u)"
+  for e in $exts; do
+    grep -qiE "^\*\.${e}\$" "$REPO/.gitignore" || printf '*.%s\n' "$e" >> "$REPO/.gitignore"
+  done
+  echo
+  echo "Done. Review the changes and commit, e.g.:"
+  echo "    git status && git add -A && git commit -m 'Drop WPE-rejected file types from tracking'"
+  exit 0
+fi
+
+# ---- default: detect and report ----
+status=0
+if [ -n "$blocked" ]; then
+  status=2
+  echo "  ✋ These tracked files are types WP Engine's git push REJECTS:" >&2
+  printf '%s\n' "$blocked" | sed 's/^/      /' >&2
+  echo "     Fix automatically:  .githooks/wpe-file-check --fix" >&2
+fi
+
+# Non-blocking heads-up for unusually large tracked files.
+large="$(git ls-files -z | xargs -0 du -k 2>/dev/null | awk -v t="$WARN_KB" '$1>t{printf "      %6d KB  %s\n",$1,$2}')"
+if [ -n "$large" ]; then
+  echo "  ⚠ Large tracked files (WPE has size limits — eyeball these):" >&2
+  printf '%s\n' "$large" >&2
+fi
+
+exit $status

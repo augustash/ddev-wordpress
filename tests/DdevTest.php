@@ -296,6 +296,183 @@ final class DdevTest extends DdevTestCase {
     $this->assertFalse(self::call('unignoreDdevDir'));
   }
 
+  // ---------------------------------------------------------------------------
+  // applyWpEngineConfigHooks() — assert the core.hooksPath post-start hook.
+  // ---------------------------------------------------------------------------
+
+  public function testApplyWpEngineConfigHooksAddsHooksPath(): void {
+    $result = self::call('applyWpEngineConfigHooks', []);
+    $this->assertSame(
+      [['exec-host' => 'git config core.hooksPath .githooks']],
+      $result['hooks']['post-start']
+    );
+  }
+
+  public function testApplyWpEngineConfigHooksPreservesOtherHooks(): void {
+    // The hooks-path assertion leads; an unrelated site hook survives after it.
+    $config = ['hooks' => ['post-start' => [['exec-host' => 'ddev db']]]];
+    $result = self::call('applyWpEngineConfigHooks', $config);
+    $this->assertSame([
+      ['exec-host' => 'git config core.hooksPath .githooks'],
+      ['exec-host' => 'ddev db'],
+    ], $result['hooks']['post-start']);
+  }
+
+  public function testApplyWpEngineConfigHooksIsIdempotent(): void {
+    // Re-running must not stack a second identical hook (dedup by exec-host).
+    $once = self::call('applyWpEngineConfigHooks', []);
+    $twice = self::call('applyWpEngineConfigHooks', $once);
+    $this->assertSame($once, $twice);
+  }
+
+  // ---------------------------------------------------------------------------
+  // insertAfterAllowlist() — place rules with the allowlist, not at EOF.
+  // ---------------------------------------------------------------------------
+
+  public function testInsertAfterAllowlistInsertsAfterLastBang(): void {
+    $gi = "/*\n!/.gitignore\n!/wp-content/\nwp-content/uploads/\n";
+    $result = self::call('insertAfterAllowlist', $gi, "!/patches/\n");
+    $this->assertSame(
+      "/*\n!/.gitignore\n!/wp-content/\n!/patches/\nwp-content/uploads/\n",
+      $result
+    );
+  }
+
+  public function testInsertAfterAllowlistAppendsWhenNoBangEntry(): void {
+    // No `!` allowlist entry to anchor to — fall back to appending at EOF.
+    $gi = "wp-content/uploads/\n";
+    $result = self::call('insertAfterAllowlist', $gi, "!/patches/\n");
+    $this->assertSame("wp-content/uploads/\n!/patches/\n", $result);
+  }
+
+  // ---------------------------------------------------------------------------
+  // configureWpEngineGitignore() — un-ignore .githooks/patches + block types.
+  // ---------------------------------------------------------------------------
+
+  public function testConfigureWpEngineGitignoreAddsUnignoresAndBlockedTypes(): void {
+    // Deny-all repo that does not yet un-ignore .githooks or patches.
+    $file = $this->writeGitignore("/*\n!/.gitignore\n!/wp-content/\nwp-content/uploads/\n");
+
+    $this->assertTrue(self::call('configureWpEngineGitignore'));
+
+    $result = file_get_contents($file);
+    $this->assertStringContainsString("!/.githooks/\n!/patches/\n", $result);
+    $this->assertStringContainsString('# WP Engine rejects these file types', $result);
+    $this->assertStringContainsString('*.exe', $result);
+  }
+
+  public function testConfigureWpEngineGitignoreIsIdempotent(): void {
+    $file = $this->writeGitignore("/*\n!/.gitignore\n!/wp-content/\n");
+
+    $this->assertTrue(self::call('configureWpEngineGitignore'), 'First pass modifies.');
+    $after = file_get_contents($file);
+
+    $this->assertFalse(self::call('configureWpEngineGitignore'), 'Second pass is a no-op.');
+    $this->assertSame($after, file_get_contents($file));
+    // No duplication of either the un-ignore or the blocked-types block.
+    $this->assertSame(1, substr_count($after, "!/.githooks/\n"));
+    $this->assertSame(1, substr_count($after, '# WP Engine rejects these file types'));
+  }
+
+  public function testConfigureWpEngineGitignoreNoopWithoutDenyAll(): void {
+    // A normal .gitignore (no `/*`) is not a WPE repo — nothing to do.
+    $normal = "wp-content/uploads/\n.DS_Store\n";
+    $this->writeGitignore($normal);
+    $this->assertFalse(self::call('configureWpEngineGitignore'));
+    $this->assertSame($normal, file_get_contents(self::gitignorePath()));
+  }
+
+  public function testConfigureWpEngineGitignoreDoesNotDuplicateExistingUnignore(): void {
+    // .githooks already un-ignored: only patches (+ blocked types) get added.
+    $file = $this->writeGitignore("/*\n!/.gitignore\n!/.githooks/\n!/wp-content/\n");
+
+    $this->assertTrue(self::call('configureWpEngineGitignore'));
+
+    $result = file_get_contents($file);
+    $this->assertSame(1, substr_count($result, "!/.githooks/\n"));
+    $this->assertStringContainsString("!/patches/\n", $result);
+  }
+
+  // ---------------------------------------------------------------------------
+  // installWpEngineHooks() — copy the guard into .githooks, seed wpe-targets.
+  // ---------------------------------------------------------------------------
+
+  public function testInstallWpEngineHooksCopiesEngineAndSeedsTargets(): void {
+    $dir = $this->setHooksDest();
+
+    $this->assertTrue(self::call('installWpEngineHooks'));
+
+    foreach (['pre-push', 'wpe-file-check', 'repo-versions', 'drift.php', 'wpe-targets'] as $f) {
+      $this->assertFileExists($dir . '/' . $f);
+    }
+    // Engine scripts carry the generated marker; the three scripts are +x.
+    $this->assertStringContainsString('ddev-wordpress-generated', file_get_contents($dir . '/pre-push'));
+    $this->assertTrue(is_executable($dir . '/pre-push'));
+    $this->assertTrue(is_executable($dir . '/wpe-file-check'));
+    $this->assertTrue(is_executable($dir . '/repo-versions'));
+  }
+
+  public function testInstallWpEngineHooksIsIdempotent(): void {
+    $dir = $this->setHooksDest();
+
+    $this->assertTrue(self::call('installWpEngineHooks'), 'First pass installs.');
+    $before = self::snapshot($dir);
+
+    $this->assertFalse(self::call('installWpEngineHooks'), 'Second pass is a no-op.');
+    $this->assertSame($before, self::snapshot($dir));
+  }
+
+  public function testInstallWpEngineHooksRespectsOwnershipWhenMarkerRemoved(): void {
+    $dir = $this->setHooksDest();
+    self::call('installWpEngineHooks');
+
+    // A dev takes ownership by removing the marker and editing the hook.
+    $custom = "#!/usr/bin/env bash\n# my own pre-push\n";
+    file_put_contents($dir . '/pre-push', $custom);
+
+    self::call('installWpEngineHooks');
+    $this->assertSame($custom, file_get_contents($dir . '/pre-push'), 'Owned hook left alone.');
+  }
+
+  public function testInstallWpEngineHooksNeverOverwritesTargets(): void {
+    $dir = $this->setHooksDest();
+    self::call('installWpEngineHooks');
+
+    // wpe-targets is project data: a filled-in map must survive re-runs.
+    $filled = "production/mysite  mysite@mysite.ssh.wpengine.net  mysite\n";
+    file_put_contents($dir . '/wpe-targets', $filled);
+
+    self::call('installWpEngineHooks');
+    $this->assertSame($filled, file_get_contents($dir . '/wpe-targets'));
+  }
+
+  /**
+   * Redirect $hooksDestPath at a fresh temp dir (reusing setConfigDir's dir so
+   * it's cleaned up in tearDown), and return it.
+   */
+  private function setHooksDest(): string {
+    $dir = $this->setConfigDir();
+    $ref = new \ReflectionProperty(\Augustash\Ddev::class, 'hooksDestPath');
+    $ref->setAccessible(TRUE);
+    $ref->setValue(NULL, $dir);
+    return $dir;
+  }
+
+  /**
+   * Map of filename => contents for the files directly in $dir (for no-op
+   * comparisons that ignore mtime — the copy rewrites bytes even on a no-op).
+   */
+  private static function snapshot(string $dir): array {
+    $out = [];
+    foreach (glob($dir . '/*') ?: [] as $file) {
+      if (is_file($file)) {
+        $out[basename($file)] = file_get_contents($file);
+      }
+    }
+    ksort($out);
+    return $out;
+  }
+
   /**
    * Write .gitignore contents to a temp file, redirect $gitIgnorePath, return.
    */

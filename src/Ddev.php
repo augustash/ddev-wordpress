@@ -40,6 +40,13 @@ class Ddev {
   private static $ddevRoot = __DIR__ . '/../../../../.ddev/';
 
   /**
+   * Destination dir for the deploy-guard git hooks (project root .githooks).
+   *
+   * @var string
+   */
+  private static $hooksDestPath = __DIR__ . '/../../../../.githooks';
+
+  /**
    * Entry point for the `ddev-setup` composer script.
    *
    * Honors an optional update flag (`-u`) to refresh in place without prompts;
@@ -144,6 +151,13 @@ class Ddev {
     // already supplied by a config.*.yaml override are redundant clutter.
     $config = static::pruneDefaultKeys($config);
     $config = static::dedupeWebEnvironment($config);
+
+    // WP Engine: point git at the deploy-guard hooks on every start (gated).
+    // The hook files themselves are installed by applyWpEngineFixups() below;
+    // this just asserts core.hooksPath, which is per-clone and must be re-set.
+    if (static::isWpEngineSite(__DIR__ . '/../../../../' . static::$settingsLocalPath)) {
+      $config = static::applyWpEngineConfigHooks($config);
+    }
 
     static::writeConfig($event, $config);
     static::writeSettingsLocal($event);
@@ -614,6 +628,171 @@ class Ddev {
     if (static::unignoreDdevDir()) {
       $event->getIO()->info('<info>WP Engine .gitignore updated to track .ddev/.</info>');
     }
+    if (static::installWpEngineHooks()) {
+      $event->getIO()->info('<info>WP Engine deploy-guard hooks installed in .githooks/.</info>');
+    }
+    if (static::configureWpEngineGitignore()) {
+      $event->getIO()->info('<info>WP Engine .gitignore updated for .githooks/, patches/, and blocked file types.</info>');
+    }
+  }
+
+  /**
+   * Install the WP Engine deploy-guard git hooks into the project's .githooks/.
+   *
+   * Ships the pre-push guard (WPE-rejected file types + plugin/theme version
+   * drift) plus its helpers. The engine files carry a `ddev-wordpress-generated`
+   * marker and are overwritten on every pass — unless a dev removed the marker
+   * to take ownership, in which case that file is left alone. The wpe-targets
+   * map is project data: seeded once, never overwritten.
+   *
+   * core.hooksPath is asserted separately, via the post-start hook added in
+   * applyWpEngineConfigHooks(), so the guard activates for every clone.
+   *
+   * @return bool
+   *   TRUE when any hook file was written or seeded, FALSE when all were current.
+   */
+  protected static function installWpEngineHooks() {
+    $fileSystem = new Filesystem();
+    $src = __DIR__ . '/../assets/githooks/';
+    $dst = static::$hooksDestPath . '/';
+    $marker = 'ddev-wordpress-generated';
+
+    // name => is it an executable script.
+    $engine = [
+      'pre-push' => TRUE,
+      'wpe-file-check' => TRUE,
+      'repo-versions' => TRUE,
+      'drift.php' => FALSE,
+    ];
+
+    $changed = FALSE;
+    foreach ($engine as $name => $executable) {
+      $target = $dst . $name;
+      // A dev who removed the marker owns the file now — don't clobber it.
+      if (is_file($target) && strpos(file_get_contents($target), $marker) === FALSE) {
+        continue;
+      }
+      $before = is_file($target) ? file_get_contents($target) : NULL;
+      $fileSystem->copy($src . $name, $target, TRUE);
+      if ($executable) {
+        $fileSystem->chmod($target, 0755);
+      }
+      if ($before !== file_get_contents($target)) {
+        $changed = TRUE;
+      }
+    }
+
+    // Project-owned target map: seed the commented template once, never rewrite.
+    if (!$fileSystem->exists($dst . 'wpe-targets')) {
+      $fileSystem->copy($src . 'wpe-targets', $dst . 'wpe-targets');
+      $changed = TRUE;
+    }
+
+    return $changed;
+  }
+
+  /**
+   * Add the post-start hook that points git at .githooks on every start.
+   *
+   * core.hooksPath is per-clone local git config (not committed), so relying on
+   * a one-time setup means a fresh clone runs without the deploy guard. Asserting
+   * it as a post-start exec-host hook re-applies it on every `ddev start`, for
+   * every teammate. Deduped by mergePostStartHooks(), so re-runs don't stack.
+   *
+   * @param array $config
+   *   The current site configuration.
+   *
+   * @return array
+   *   The configuration with the hooks-path post-start hook asserted.
+   */
+  protected static function applyWpEngineConfigHooks(array $config) {
+    $hooks = [
+      'hooks' => [
+        'post-start' => [
+          ['exec-host' => 'git config core.hooksPath .githooks'],
+        ],
+      ],
+    ];
+    return static::mergePostStartHooks($config, $hooks);
+  }
+
+  /**
+   * Ensure the WP Engine `/*` deny-all .gitignore carries the hook + patch dirs
+   * and ignores the file types WPE's git push rejects.
+   *
+   * Two idempotent edits, only on a `/*` deny-all repo:
+   * 1. Un-ignore !/.githooks/ and !/patches/ in the allowlist (the guard and any
+   *    tracked plugin patches must be committed and deploy with the site).
+   * 2. Append the blocked file types (executables/video) WPE refuses on push, so
+   *    a bundled plugin binary is ignored rather than bouncing a deploy.
+   *
+   * @return bool
+   *   TRUE when the .gitignore was modified, FALSE when already correct or not a
+   *   `/*` deny-all repo.
+   */
+  protected static function configureWpEngineGitignore() {
+    $fileSystem = new Filesystem();
+    if (!$fileSystem->exists(static::$gitIgnorePath)) {
+      return FALSE;
+    }
+    $gitignore = file_get_contents(static::$gitIgnorePath);
+    $original = $gitignore;
+
+    // Only relevant to the WPE `/*` deny-all convention.
+    if (!preg_match('/^\s*\/\*\s*$/m', $gitignore)) {
+      return FALSE;
+    }
+
+    // 1. Un-ignore the hook + patch dirs (each only if not already present).
+    $unignore = [];
+    if (!preg_match('/^\s*!\/?\.githooks\b/m', $gitignore)) {
+      $unignore[] = '!/.githooks/';
+    }
+    if (!preg_match('/^\s*!\/?patches\b/m', $gitignore)) {
+      $unignore[] = '!/patches/';
+    }
+    if ($unignore) {
+      $gitignore = static::insertAfterAllowlist($gitignore, implode("\n", $unignore) . "\n");
+    }
+
+    // 2. Ignore the file types WPE rejects on push (sentinel-guarded append).
+    if (strpos($gitignore, '# WP Engine rejects these file types') === FALSE) {
+      $gitignore = rtrim($gitignore, "\n") . "\n\n"
+        . "# WP Engine rejects these file types (executables/video) on git push.\n"
+        . "*.exe\n*.dll\n*.mp4\n*.mov\n*.avi\n";
+    }
+
+    if ($gitignore === $original) {
+      return FALSE;
+    }
+    $fileSystem->dumpFile(static::$gitIgnorePath, $gitignore);
+    return TRUE;
+  }
+
+  /**
+   * Insert allowlist rules right after the last `!` entry in a deny-all .gitignore.
+   *
+   * Keeps new un-ignore rules contiguous with the existing allowlist rather than
+   * trailing at EOF. Falls back to appending when no `!` entry exists.
+   *
+   * @param string $gitignore
+   *   The .gitignore contents.
+   * @param string $rules
+   *   The rule text to insert (newline-terminated).
+   *
+   * @return string
+   *   The updated contents.
+   */
+  protected static function insertAfterAllowlist($gitignore, $rules) {
+    if (preg_match_all('/^\s*!.*\n?/m', $gitignore, $m, PREG_OFFSET_CAPTURE)) {
+      $last = end($m[0]);
+      $insertAt = $last[1] + strlen($last[0]);
+      if (substr($gitignore, $insertAt - 1, 1) !== "\n") {
+        $rules = "\n" . $rules;
+      }
+      return substr($gitignore, 0, $insertAt) . $rules . substr($gitignore, $insertAt);
+    }
+    return rtrim($gitignore, "\n") . "\n" . $rules;
   }
 
   /**
@@ -915,6 +1094,7 @@ class Ddev {
       static::$ddevRoot . 'docker-compose.browsersync.yaml',
       static::$ddevRoot . 'web-build/Dockerfile.ddev-terminus',
       static::$ddevRoot . 'commands/host/db',
+      $projectRoot . '.githooks',
     ];
 
     $parts = [];

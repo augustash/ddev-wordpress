@@ -1,0 +1,107 @@
+#!/usr/bin/env bash
+# ddev-wordpress-generated — managed by augustash/ddev-wordpress; overwritten on
+# composer update. Remove this line to take ownership and stop updates.
+#
+# pre-push — WP Engine deploy safety net.
+#
+# Two gates before a WPE deploy:
+#   1. WPE-rejected file types (executables/video) — fast, local, no SSH.
+#   2. Plugin/theme version drift — blocks when the LIVE server has a NEWER
+#      version than the repo (someone updated it in wp-admin / Smart Plugin
+#      Manager); pushing would silently REVERT it. Repo-ahead is a normal
+#      forward deploy and passes.
+#
+# The server for each remote comes from .githooks/wpe-targets (per project):
+#   <remote-url-substring>  <ssh-gateway-host>  <install-name>
+#
+# Bypass (only when you are certain): git push --no-verify
+#
+set -uo pipefail
+
+remote_url="$2"
+
+# Only guard WPE deploys; other remotes push freely.
+case "$remote_url" in
+  *git.wpengine.com*) ;;
+  *) exit 0 ;;
+esac
+
+REPO="$(git rev-parse --show-toplevel)"
+
+# --- Gate 1: file types WPE's git push rejects (local, no SSH) ---------------
+echo "==> pre-push: checking for WPE-rejected file types…" >&2
+if ! "$REPO/.githooks/wpe-file-check"; then
+  echo "  Push blocked. Auto-fix: .githooks/wpe-file-check --fix  (then commit)" >&2
+  echo "  Override (not recommended — WPE will reject it): git push --no-verify" >&2
+  exit 1
+fi
+
+# --- Resolve the gateway target for this remote from wpe-targets -------------
+TARGETS="$REPO/.githooks/wpe-targets"
+SSH_HOST=""; SITE=""
+if [ -f "$TARGETS" ]; then
+  while read -r pat host site _; do
+    case "$pat" in ''|\#*) continue ;; esac        # skip blanks + comments
+    case "$remote_url" in *"$pat"*) SSH_HOST="$host"; SITE="$site"; break ;; esac
+  done < "$TARGETS"
+fi
+
+if [ -z "$SSH_HOST" ] || [ -z "$SITE" ]; then
+  echo "pre-push: no .githooks/wpe-targets entry matches $remote_url — skipping version drift check." >&2
+  echo "  Add a line: <remote-url-substring> <ssh-gateway-host> <install-name>" >&2
+  exit 0
+fi
+
+# --- Gate 2: plugin/theme version drift vs the live server ------------------
+echo "==> pre-push: comparing plugin/theme versions against $SITE (live)…" >&2
+
+repo_file="$(mktemp)"; server_json="$(mktemp)"
+trap 'rm -f "$repo_file" "$server_json"' EXIT
+
+# Repo side: versions from WordPress headers (type\tname\tversion).
+"$REPO/.githooks/repo-versions" > "$repo_file"
+
+# Server side: json, read without executing plugins (sidesteps plugin fatals).
+# One round-trip: plugins json, a @@THEMES@@ marker, then themes json.
+ssh "$SSH_HOST" "cd sites/$SITE && \
+  wp plugin list --skip-plugins --skip-themes --fields=name,version --format=json 2>/dev/null; \
+  echo '@@THEMES@@'; \
+  wp theme  list --skip-plugins --skip-themes --fields=name,version --format=json 2>/dev/null" \
+  > "$server_json" 2>/dev/null
+
+if [ ! -s "$server_json" ]; then
+  echo "pre-push: could not read versions from server — is the SSH gateway reachable? (bypass: --no-verify)" >&2
+  exit 1
+fi
+
+# Compare with PHP's version_compare; drift.php exits 2 when the server is ahead.
+drift="$(php "$REPO/.githooks/drift.php" "$repo_file" < "$server_json" 2>&1)"
+drift_status=$?
+
+if [ "$drift_status" = "1" ]; then
+  echo "pre-push: drift check failed — $drift (bypass: --no-verify)" >&2
+  exit 1
+fi
+
+if [ "$drift_status" = "2" ]; then
+  cat >&2 <<EOF
+
+  ✋ DEPLOY BLOCKED — the live server has NEWER versions than your repo:
+
+$drift
+  Pushing would REVERT these to the repo's older copies (someone updated
+  them on the server outside git).
+
+  Reconcile each — pull the server's copy into the repo, then commit:
+    rsync -rc $SSH_HOST:sites/$SITE/wp-content/plugins/<name>/ \\
+             $REPO/wp-content/plugins/<name>/
+    git add -A && git commit -m "Pull server-side update: <name>"
+
+  Then push again. To override deliberately: git push --no-verify
+
+EOF
+  exit 1
+fi
+
+echo "==> pre-push: repo is level with or ahead of the server — safe to deploy." >&2
+exit 0

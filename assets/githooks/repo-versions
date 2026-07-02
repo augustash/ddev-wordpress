@@ -1,0 +1,30 @@
+#!/usr/bin/env bash
+# ddev-wordpress-generated — managed by augustash/ddev-wordpress; overwritten on
+# composer update. Remove this line to take ownership and stop updates.
+#
+# repo-versions — print "<type>\t<name>\t<version>" for every plugin and
+# theme in the repo, read from its WordPress header (the same headers WP
+# itself parses). Used by the pre-push drift check; also handy standalone.
+#
+set -uo pipefail
+REPO="$(git rev-parse --show-toplevel)"
+
+# Pull the Version: header value out of a file (handles " * Version: x.y").
+extract_version() {
+  grep -iEm1 '^[[:space:]*]*Version:' "$1" 2>/dev/null \
+    | sed -E 's/.*[Vv]ersion:[[:space:]]*//; s/[[:space:]]*$//' | tr -d '\r'
+}
+
+# Plugins: main file is the top-level *.php in the plugin dir with "Plugin Name:".
+for d in "$REPO"/wp-content/plugins/*/; do
+  [ -d "$d" ] || continue
+  main=$(grep -ilEm1 'Plugin Name:' "$d"*.php 2>/dev/null | head -1)
+  [ -n "$main" ] || continue
+  printf 'plugin\t%s\t%s\n' "$(basename "$d")" "$(extract_version "$main")"
+done
+
+# Themes: main file is style.css (carries "Theme Name:" + "Version:").
+for d in "$REPO"/wp-content/themes/*/; do
+  [ -d "$d" ] && [ -f "$d/style.css" ] || continue
+  printf 'theme\t%s\t%s\n' "$(basename "$d")" "$(extract_version "$d/style.css")"
+done
