@@ -18,6 +18,7 @@
 #
 set -uo pipefail
 
+remote_name="$1"
 remote_url="$2"
 
 # Only guard WPE deploys; other remotes push freely.
@@ -92,12 +93,11 @@ $drift
   Pushing would REVERT these to the repo's older copies (someone updated
   them on the server outside git).
 
-  Reconcile each — pull the server's copy into the repo, then commit:
-    rsync -rc $SSH_HOST:sites/$SITE/wp-content/plugins/<name>/ \\
-             $REPO/wp-content/plugins/<name>/
-    git add -A && git commit -m "Pull server-side update: <name>"
+  Reconcile — pull every server-newer item into the repo in one step:
+    .githooks/wpe-reconcile $remote_name
 
-  Then push again. To override deliberately: git push --no-verify
+  then review the diff, commit, and push again.
+  To override deliberately: git push --no-verify
 
 EOF
   exit 1

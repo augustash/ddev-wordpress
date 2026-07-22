@@ -1,0 +1,105 @@
+#!/usr/bin/env bash
+# ddev-wordpress-generated — managed by augustash/ddev-wordpress; overwritten on
+# composer update. Remove this line to take ownership and stop updates.
+#
+# wpe-reconcile — pull server-side plugin/theme updates into the repo BEFORE a
+# WP Engine deploy, so the deploy doesn't REVERT them.
+#
+# WPE auto-updates plugins on the live filesystem (wp-admin / Smart Plugin
+# Manager), outside git. The pre-push guard BLOCKS a deploy when the server is
+# newer than the repo, because a `git push` deploy overwrites live with the
+# repo's older copies. But a pre-push hook can't fix the push it is already
+# running — the refs are negotiated — so reconcile is a SEPARATE step you run
+# first. This finds every drifted item, rsyncs the live copy down, and stages
+# it. Review, commit, push: the guard is now clean.
+#
+#   wpe-reconcile [<remote>]   remote as in `git push <remote>` (e.g. wpe-prod).
+#                              Omit when the repo has exactly one WPE remote.
+#
+# Leaves changes STAGED, never commits — you review the plugin diff and commit
+# (a suggested message is printed).
+#
+set -uo pipefail
+
+REPO="$(git rev-parse --show-toplevel)" || exit 1
+cd "$REPO" || exit 1
+TARGETS="$REPO/.githooks/wpe-targets"
+
+# --- Resolve which WPE remote to reconcile against --------------------------
+# Push rows whose URL points at WPE: "<name>\t<url>\t(push)".
+wpe_remotes() { git remote -v | awk '/git\.wpengine\.com/ && $3=="(push)"{print $1}' | sort -u; }
+
+remote="${1:-}"
+if [ -z "$remote" ]; then
+  _r="$(wpe_remotes)"
+  _n="$(printf '%s\n' "$_r" | grep -c .)"
+  if [ "$_n" = "1" ]; then
+    remote="$_r"
+  else
+    echo "wpe-reconcile: name a WPE remote (as in 'git push <remote>'):" >&2
+    printf '  %s\n' $_r >&2
+    exit 1
+  fi
+fi
+
+remote_url="$(git remote get-url "$remote" 2>/dev/null)"
+if [ -z "$remote_url" ]; then
+  echo "wpe-reconcile: unknown git remote '$remote'." >&2
+  exit 1
+fi
+
+# --- Map remote URL -> SSH gateway + install (same table as pre-push) -------
+SSH_HOST=""; SITE=""
+if [ -f "$TARGETS" ]; then
+  while read -r pat host site _; do
+    case "$pat" in ''|\#*) continue ;; esac
+    case "$remote_url" in *"$pat"*) SSH_HOST="$host"; SITE="$site"; break ;; esac
+  done < "$TARGETS"
+fi
+if [ -z "$SSH_HOST" ] || [ -z "$SITE" ]; then
+  echo "wpe-reconcile: no .githooks/wpe-targets entry matches $remote_url" >&2
+  exit 1
+fi
+
+echo "==> wpe-reconcile: checking drift against $SITE (live)…" >&2
+
+# --- Detect drift (reuse the guard's own machinery) -------------------------
+repo_file="$(mktemp)"; server_json="$(mktemp)"
+trap 'rm -f "$repo_file" "$server_json"' EXIT
+
+"$REPO/.githooks/repo-versions" > "$repo_file"
+# One round-trip: plugins json, a @@THEMES@@ marker, then themes json. Read
+# without executing plugins (sidesteps plugin fatals) — mirrors pre-push.
+ssh "$SSH_HOST" "cd sites/$SITE && \
+  wp plugin list --skip-plugins --skip-themes --fields=name,version --format=json 2>/dev/null; \
+  echo '@@THEMES@@'; \
+  wp theme  list --skip-plugins --skip-themes --fields=name,version --format=json 2>/dev/null" \
+  > "$server_json" 2>/dev/null
+
+if [ ! -s "$server_json" ]; then
+  echo "wpe-reconcile: could not read versions from server — is the SSH gateway reachable?" >&2
+  exit 1
+fi
+
+drift="$(php "$REPO/.githooks/drift.php" "$repo_file" < "$server_json" 2>&1)"
+case $? in
+  0) echo "==> wpe-reconcile: no drift — repo is level with or ahead of $SITE. Nothing to pull." >&2; exit 0 ;;
+  2) : ;;  # drift found — fall through and reconcile
+  *) echo "wpe-reconcile: drift check failed — $drift" >&2; exit 1 ;;
+esac
+
+# --- Pull each drifted item down --------------------------------------------
+# drift.php prints one line per server-newer item:
+#   "    plugin/acf   repo=6.8.5   server=6.8.6"  → first field is "<type>/<name>".
+printf '%s\n' "$drift" | awk '{print $1}' | while IFS=/ read -r type name; do
+  [ -n "$name" ] || continue
+  dir="wp-content/${type}s/$name"          # plugin -> plugins, theme -> themes
+  echo "==> pulling $type/$name -> $dir" >&2
+  rsync -rc "$SSH_HOST:sites/$SITE/$dir/" "$REPO/$dir/"
+  git add -A -- "$REPO/$dir"
+done
+
+echo "" >&2
+echo "==> wpe-reconcile: pulled + staged. Review the diff, then:" >&2
+echo "      git commit -m \"Reconcile live plugin/theme drift ($SITE)\"" >&2
+echo "      git push $remote" >&2

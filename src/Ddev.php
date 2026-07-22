@@ -661,6 +661,7 @@ class Ddev {
     $engine = [
       'pre-push' => TRUE,
       'wpe-file-check' => TRUE,
+      'wpe-reconcile' => TRUE,
       'repo-versions' => TRUE,
       'drift.php' => FALSE,
     ];
