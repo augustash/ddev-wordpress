@@ -1,57 +1,58 @@
 # Setup
 
 ```
-ddev composer config extra.drupal-scaffold.allowed-packages --json '["augustash/ddev-wordpress"]' && ddev composer config scripts.ddev-setup 'Augustash\Ddev::postPackageInstall' && ddev composer config scripts.post-update-cmd 'Augustash\Ddev::postUpdate' && ddev composer require augustash/ddev-wordpress && ddev composer ddev-setup
+ddev composer config extra.drupal-scaffold.allowed-packages --json '["augustash/ddev-wordpress"]' && ddev composer config scripts.ddev-setup 'Augustash\Ddev::postPackageInstall' && ddev composer require augustash/ddev-wordpress && ddev composer ddev-setup
 ```
 
-Follow the prompts to complete configuration.
-
-> **Why scalar `composer config`, not `--json`?** The two script values contain
-> backslashes (the `Augustash\Ddev` namespace separator). Passing them as inline
-> JSON through `ddev composer config --json '[...]'` lets the double shell (host →
-> container) eat the backslashes, so Composer stores the value as a quoted *string*
-> — `"[\"Augustash\\Ddev::postUpdate\"]"` — instead of an array. The next
-> `composer update` then fails with `Class "[\"Augustash\Ddev ... is not autoloadable`.
-> The scalar form above sidesteps it: a single hook is a valid scalar script value.
-> (The `allowed-packages` line keeps `--json` safely — it has no backslashes.)
->
-> **Already have a `post-update-cmd`?** (e.g. a Pantheon
-> `DrupalComposerManaged\ComposerScripts::postUpdate` hook) the scalar command
-> *replaces* it. Skip that one segment and instead add `Augustash\Ddev::postUpdate`
-> to the existing array by editing `composer.json` directly, so both hooks run:
-> ```json
-> "post-update-cmd": [
->     "DrupalComposerManaged\\ComposerScripts::postUpdate",
->     "Augustash\\Ddev::postUpdate"
-> ]
-> ```
+Follow the prompts to complete configuration. The `ddev-setup` run wires the
+`post-install-cmd` / `post-update-cmd` auto-refresh hooks into `composer.json`
+itself, so the installer doesn't — and neither do you.
 
 # Updating
 
-The generated scaffolding and hooks refresh **automatically** on every
-`composer update`: the `post-update-cmd` hook (`Augustash\Ddev::postUpdate`)
-re-runs setup in update mode without re-prompting. So pulling the latest
-`ddev-wordpress` is normally all you need:
+The generated scaffolding refreshes **automatically** — nobody has to remember a
+setup command. The initial `ddev composer ddev-setup` wires two composer hooks
+into `composer.json` (`post-install-cmd` → `Augustash\Ddev::postInstall`,
+`post-update-cmd` → `postUpdate`), merged alongside any hooks already there. From
+then on they re-run setup in update mode — no prompts — on every composer install
+or update:
 ```bash
-ddev composer update augustash/ddev-wordpress
+ddev composer update augustash/ddev-wordpress   # or just `ddev composer install` after a pull
 ```
+
+> **Upgrading a project installed before 1.0.34?** The auto-refresh hooks have to
+> be wired into your `composer.json` once — run `ddev composer ddev-setup update`
+> (no prompts). After that you never run it again; the scaffolding is kept
+> up-to-date automatically on every install/update.
+
 Update mode keeps your existing `config.yaml` values (client code, PHP version,
-subdomains) and only rebuilds what may have changed — BrowserSync, the Terminus
-image, and the Pantheon add-on hook (upgraded in place to track `develop`). Run
-`ddev restart` afterward to rebuild the containers and re-pull add-ons.
+subdomains, Pantheon env) and only rebuilds what may have changed — BrowserSync,
+the Terminus image, and the Pantheon add-on hook (upgraded in place to track
+`develop`).
 
-To force a refresh **without** updating the package, re-run setup manually in
-update mode (`-u`):
+The hooks run **only inside ddev** (guarded on `IS_DDEV_PROJECT`), so a Pantheon
+build, CI, or host `composer install` never touches the `.ddev` scaffolding.
+
+When a run changes a managed file it ends with *“Scaffolding refreshed — run
+`ddev restart` to acquire the changes”*; a no-op ends with *“Everything
+up-to-date.”* The script runs inside the web container and can't invoke the
+host's `ddev`, so it tells you to restart rather than doing it for you (ddev also
+warns natively when `config.yaml` changes).
+
+### Changing configuration values
+
+Since refreshes are automatic, you only run setup by hand when you actually need
+to **change** a value (a typo'd client code, a PHP bump, …):
 ```bash
-ddev composer ddev-setup -- -u
+ddev composer ddev-setup
 ```
-
-Omit `-u` to be re-prompted for the configuration values (the original setup
-flow).
+It walks the config prompts pre-filled with your current answers — press enter to
+keep each, or type a new value for the one you're changing.
 
 # Configuration
 
-On ddev-setup, you will be prompted for:
+Running `ddev composer ddev-setup` (first-time setup, or to change a value) prompts
+for:
   - Client code
   - PHP version
   - Is this site hosted on Pantheon? — if yes:
@@ -59,7 +60,9 @@ On ddev-setup, you will be prompted for:
     - Pantheon site environment
   - Subdomains (optional)
 
-These are used to set config.yaml ddev configuration.
+These are used to set config.yaml ddev configuration. On a re-run each prompt is
+pre-filled with the project's current value, so pressing enter through them keeps
+the existing configuration unchanged.
 
 # Database
 
