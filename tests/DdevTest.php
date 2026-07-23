@@ -95,6 +95,147 @@ final class DdevTest extends DdevTestCase {
   }
 
   // ---------------------------------------------------------------------------
+  // Entry-point seams: argsRequestUpdate() + isConfigured() + isDdevContext()
+  //
+  // argsRequestUpdate backs the unadvertised `update` override; isConfigured
+  // seeds the Pantheon prompt default; isDdevContext guards the install/update
+  // auto-refresh hooks so they never fire on a Pantheon build / CI / host
+  // composer run. Generic (not WordPress-specific); belong in DdevTestCase once
+  // both packages carry them.
+  // ---------------------------------------------------------------------------
+
+  public function testArgsRequestUpdateDetectsFlags(): void {
+    $this->assertTrue(self::call('argsRequestUpdate', ['-u']));
+    $this->assertTrue(self::call('argsRequestUpdate', ['--update']));
+    $this->assertTrue(self::call('argsRequestUpdate', ['update']));
+    $this->assertTrue(self::call('argsRequestUpdate', ['x', 'update']));
+  }
+
+  public function testArgsRequestUpdateFalseWithoutFlag(): void {
+    $this->assertFalse(self::call('argsRequestUpdate', []));
+    $this->assertFalse(self::call('argsRequestUpdate', ['foo', '-x']));
+  }
+
+  public function testIsConfiguredTrueForNonEmptyName(): void {
+    $dir = $this->setConfigDir();
+    file_put_contents($dir . '/config.yaml', "name: acme\n");
+    $this->assertTrue(self::call('isConfigured'));
+  }
+
+  public function testIsConfiguredFalseForEmptyOrMissingName(): void {
+    $dir = $this->setConfigDir();
+    file_put_contents($dir . '/config.yaml', "name:\ntype: wordpress\n");
+    $this->assertFalse(self::call('isConfigured'));
+
+    file_put_contents($dir . '/config.yaml', "type: wordpress\n");
+    $this->assertFalse(self::call('isConfigured'));
+
+    // No config.yaml at all.
+    $this->setConfigDir();
+    $this->assertFalse(self::call('isConfigured'));
+  }
+
+  public function testIsDdevContextReflectsEnv(): void {
+    // The auto-refresh hooks are a silent no-op unless this is true — the guard
+    // that keeps `composer install` from rewriting .ddev on a Pantheon build.
+    $orig = getenv('IS_DDEV_PROJECT');
+    try {
+      putenv('IS_DDEV_PROJECT=true');
+      $this->assertTrue(self::call('isDdevContext'));
+      putenv('IS_DDEV_PROJECT=false');
+      $this->assertFalse(self::call('isDdevContext'));
+      putenv('IS_DDEV_PROJECT');
+      $this->assertFalse(self::call('isDdevContext'));
+    }
+    finally {
+      $orig === FALSE ? putenv('IS_DDEV_PROJECT') : putenv('IS_DDEV_PROJECT=' . $orig);
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Value preservation on the fresh path: configureSite() / pantheonEnvValues()
+  //
+  // A non-interactive re-run must not write empty prompt answers over an
+  // already-configured site. configureSite() guards name; pantheonEnvValues()
+  // lets the Pantheon prompts default to the existing values.
+  // ---------------------------------------------------------------------------
+
+  public function testConfigureSitePreservesNameWhenClientCodeEmpty(): void {
+    $config = ['name' => 'acme'];
+    $this->assertSame('acme', self::call('configureSite', $config, '', '8.3')['name']);
+    $this->assertSame('acme', self::call('configureSite', $config, NULL, '8.3')['name']);
+  }
+
+  public function testConfigureSiteSetsNameWhenClientCodeGiven(): void {
+    $result = self::call('configureSite', [], 'newcode', '8.4');
+    $this->assertSame('newcode', $result['name']);
+    $this->assertSame('wordpress', $result['type']);
+    $this->assertSame('8.4', $result['php_version']);
+  }
+
+  public function testPantheonEnvValuesExtractsSiteAndEnvironment(): void {
+    $config = ['web_environment' => [
+      'DDEV_PANTHEON_SITE=aaiacme',
+      'DDEV_PANTHEON_ENVIRONMENT=live',
+      'OTHER=1',
+    ]];
+    $this->assertSame(['aaiacme', 'live'], self::call('pantheonEnvValues', $config));
+  }
+
+  public function testPantheonEnvValuesNullsWhenAbsent(): void {
+    $this->assertSame([NULL, NULL], self::call('pantheonEnvValues', []));
+    $this->assertSame([NULL, NULL], self::call('pantheonEnvValues', ['web_environment' => ['X=1']]));
+  }
+
+  // ---------------------------------------------------------------------------
+  // Composer hook wiring: mergeHook()
+  //
+  // ensureComposerHooks() adds our install/update handlers to composer.json
+  // without clobbering a co-existing hook — something `composer config` can't
+  // do. The merge logic is pure and lives here; only the file I/O in
+  // ensureComposerHooks() touches JsonManipulator (runtime-only).
+  // ---------------------------------------------------------------------------
+
+  public function testMergeHookCreatesScalarWhenMissing(): void {
+    $this->assertSame('Augustash\\Ddev::postUpdate',
+      self::call('mergeHook', NULL, 'Augustash\\Ddev::postUpdate'));
+  }
+
+  public function testMergeHookConvertsScalarToArrayPreservingExisting(): void {
+    $this->assertSame(['Vendor\\Scripts::postUpdate', 'Augustash\\Ddev::postUpdate'],
+      self::call('mergeHook', 'Vendor\\Scripts::postUpdate', 'Augustash\\Ddev::postUpdate'));
+  }
+
+  public function testMergeHookAppendsToExistingArray(): void {
+    $this->assertSame(['A::x', 'B::y', 'Augustash\\Ddev::postUpdate'],
+      self::call('mergeHook', ['A::x', 'B::y'], 'Augustash\\Ddev::postUpdate'));
+  }
+
+  public function testMergeHookIsIdempotent(): void {
+    $this->assertSame('Ours', self::call('mergeHook', 'Ours', 'Ours'));
+    $this->assertSame(['A', 'Ours'], self::call('mergeHook', ['A', 'Ours'], 'Ours'));
+  }
+
+  public function testConfigShapingConvergesOnSecondPass(): void {
+    // The no-op "Everything up-to-date." status is gated on a fingerprint delta,
+    // so the shaping pipeline must reach a fixed point — a second identical pass
+    // changes nothing.
+    $config = [
+      'name' => 'site',
+      'web_environment' => ['PANTHEON_SITE=mysite', 'WORKING_ENVIRONMENT=live'],
+      'hooks' => ['post-start' => [['exec-host' => 'ddev add-on get augustash/ddev-pantheon-db']]],
+      'webserver_type' => 'nginx-fpm',
+    ];
+    $shape = function ($c) {
+      $c = self::call('migratePantheonEnv', $c);
+      $c = self::call('applyPantheonHooks', $c);
+      return self::call('pruneDefaultKeys', $c);
+    };
+    $once = $shape($config);
+    $this->assertSame($once, $shape($once), 'Shaping must be a fixed point on the second pass.');
+  }
+
+  // ---------------------------------------------------------------------------
   // isWpEngineSite() — WP Engine detection by wp-config.php constants.
   // ---------------------------------------------------------------------------
 

@@ -2,6 +2,7 @@
 
 namespace Augustash;
 
+use Composer\Json\JsonManipulator;
 use Composer\Script\Event;
 use Symfony\Component\Filesystem\Filesystem;
 use Symfony\Component\Yaml\Yaml;
@@ -17,6 +18,13 @@ class Ddev {
    * @var string
    */
   private static $configPath = __DIR__ . '/../../../../.ddev/config.yaml';
+
+  /**
+   * Path to the project composer.json.
+   *
+   * @var string
+   */
+  private static $composerPath = __DIR__ . '/../../../../composer.json';
 
   /**
    * Path to gitignore file.
@@ -49,48 +57,206 @@ class Ddev {
   /**
    * Entry point for the `ddev-setup` composer script.
    *
-   * Honors an optional update flag (`-u`) to refresh in place without prompts;
-   * see run() for the orchestration.
+   * Runs the interactive config flow, each prompt seeded from any existing value
+   * so pressing enter preserves it (which also makes a non-interactive run
+   * non-destructive — it re-affirms the current config rather than clobbering
+   * it). Routine scaffolding refreshes happen automatically via the
+   * install/update hooks, so a manual run means "I want to (re)configure". The
+   * unadvertised `update` argument forces a no-prompt refresh instead. See run()
+   * for the orchestration.
    *
    * @param \Composer\Script\Event $event
    *   The event.
    */
   public static function postPackageInstall(Event $event) {
+    // Wire the hooks first so the one-time bootstrap lands even if the config
+    // prompts below are aborted — the wiring is independent of them.
+    static::ensureComposerHooks($event);
     static::run($event, static::isUpdateMode($event));
   }
 
   /**
-   * Run on post-update-cmd.
+   * Auto-fired on `composer install` (post-install-cmd).
    *
-   * Auto-fired on `composer update`. Always runs in update mode (no prompts).
+   * Catches teammates who pull the project and `composer install` without
+   * knowing setup exists — the scaffolding refreshes for them, no command to
+   * remember. See autoRefresh() for the ddev guard.
+   *
+   * @param \Composer\Script\Event $event
+   *   The event.
+   */
+  public static function postInstall(Event $event) {
+    static::autoRefresh($event);
+  }
+
+  /**
+   * Auto-fired on `composer update` (post-update-cmd).
    *
    * @param \Composer\Script\Event $event
    *   The event.
    */
   public static function postUpdate(Event $event) {
+    static::autoRefresh($event);
+  }
+
+  /**
+   * Shared auto-refresh for the install/update hooks — ddev context only.
+   *
+   * Runs in update mode (no prompts). Guarded to the ddev web container:
+   * `composer install` also runs during Pantheon's build, CI, and host tooling,
+   * where rewriting the .ddev scaffolding would be wrong or destructive — those
+   * are a silent no-op.
+   *
+   * @param \Composer\Script\Event $event
+   *   The event.
+   */
+  private static function autoRefresh(Event $event) {
+    if (!static::isDdevContext()) {
+      return;
+    }
     static::run($event, TRUE);
   }
 
   /**
-   * Determine whether ddev-setup was invoked in update mode.
+   * Whether we're running inside the ddev web container.
    *
-   * Update mode (`ddev composer ddev-setup -- -u`) refreshes the generated
-   * scaffolding and hooks without re-prompting for, or rewriting, the
-   * project's configuration values.
+   * DDEV sets IS_DDEV_PROJECT=true in the web container and nowhere else, so it
+   * cleanly separates a ddev run from a Pantheon build / CI / host composer run.
+   *
+   * @return bool
+   *   TRUE when running inside ddev.
+   */
+  protected static function isDdevContext() {
+    return getenv('IS_DDEV_PROJECT') === 'true';
+  }
+
+  /**
+   * Determine whether an explicit update flag was passed.
    *
    * @param \Composer\Script\Event $event
    *   The event.
    *
    * @return bool
-   *   TRUE when an update flag (-u, --update, or update) was passed.
+   *   TRUE when -u, --update, or update is present.
    */
   protected static function isUpdateMode(Event $event) {
-    foreach ($event->getArguments() as $arg) {
+    return static::argsRequestUpdate($event->getArguments());
+  }
+
+  /**
+   * Whether a raw argument list requests update mode.
+   *
+   * Split from isUpdateMode() so the flag parsing is unit-testable without a
+   * Composer Event.
+   *
+   * @param array $args
+   *   The script arguments.
+   *
+   * @return bool
+   *   TRUE when -u, --update, or update is present.
+   */
+  protected static function argsRequestUpdate(array $args) {
+    foreach ($args as $arg) {
       if (in_array($arg, ['-u', '--update', 'update'], TRUE)) {
         return TRUE;
       }
     }
     return FALSE;
+  }
+
+  /**
+   * Whether config.yaml already describes a configured project.
+   *
+   * "Configured" means a non-empty `name`: the asset config.yaml that a fresh
+   * scaffold lands ships an empty name. Used to seed the Pantheon prompt default
+   * (a brand-new site defaults to yes; an existing one matches its current
+   * state).
+   *
+   * @return bool
+   *   TRUE when config.yaml exists and carries a non-empty name.
+   */
+  protected static function isConfigured() {
+    if (!(new Filesystem())->exists(static::$configPath)) {
+      return FALSE;
+    }
+    $config = Yaml::parseFile(static::$configPath);
+    return !empty($config['name']);
+  }
+
+  /**
+   * Wire the install/update auto-refresh hooks into composer.json in place.
+   *
+   * Runs on the manual `ddev composer ddev-setup` path so the hooks are laid
+   * down the first time setup is run; thereafter they fire on their own. The two
+   * lifecycle events may already hold another handler, so ours is merged in, not
+   * overwritten — `composer config` can't: `--merge --json` stringifies the
+   * array and clobbers a scalar, and the `Augustash\Ddev` backslashes are eaten
+   * through the host→container double shell. Doing it here keeps a backslash a
+   * backslash, and JsonManipulator preserves the file's existing formatting.
+   * `ddev-setup` itself isn't touched — it's a scalar nobody else defines, wired
+   * by the installer directly.
+   *
+   * @param \Composer\Script\Event $event
+   *   The event.
+   */
+  protected static function ensureComposerHooks(Event $event) {
+    if (!file_exists(static::$composerPath)) {
+      return;
+    }
+    $contents = file_get_contents(static::$composerPath);
+    $config = json_decode($contents, TRUE);
+    if (!is_array($config)) {
+      return;
+    }
+    $scripts = $config['scripts'] ?? [];
+    $handlers = [
+      'post-install-cmd' => 'Augustash\\Ddev::postInstall',
+      'post-update-cmd' => 'Augustash\\Ddev::postUpdate',
+    ];
+
+    $manipulator = new JsonManipulator($contents);
+    $wired = [];
+    foreach ($handlers as $name => $handler) {
+      $current = $scripts[$name] ?? NULL;
+      $merged = static::mergeHook($current, $handler);
+      if ($merged !== $current) {
+        $manipulator->addSubNode('scripts', $name, $merged);
+        $wired[] = $name;
+      }
+    }
+
+    if ($wired) {
+      file_put_contents(static::$composerPath, $manipulator->getContents());
+      $event->getIO()->info('<info>Wired composer auto-refresh hooks: ' . implode(', ', $wired) . '.</info>');
+    }
+  }
+
+  /**
+   * Merge our handler into an existing composer script value.
+   *
+   * Missing → create as a scalar; an existing scalar → [theirs, ours]; an
+   * existing array → append ours. Already present → returned unchanged (strict
+   * `===` compare against the input), so a re-run never duplicates and writes
+   * nothing.
+   *
+   * @param string|array|null $current
+   *   The current value of the script hook.
+   * @param string $handler
+   *   Our handler, e.g. 'Augustash\Ddev::postUpdate'.
+   *
+   * @return string|array
+   *   The merged value.
+   */
+  protected static function mergeHook($current, $handler) {
+    if ($current === NULL) {
+      return $handler;
+    }
+    $list = is_array($current) ? $current : [$current];
+    if (in_array($handler, $list, TRUE)) {
+      return $current;
+    }
+    $list[] = $handler;
+    return $list;
   }
 
   /**
@@ -125,10 +291,10 @@ class Ddev {
     $config = Yaml::parseFile(static::$configPath);
 
     if ($update) {
-      // Update mode (`ddev composer ddev-setup -- -u`): keep all configured
-      // values and skip the prompts. Infer prior choices from the existing
-      // config so the generated scaffolding and hooks can be refreshed in
-      // place — e.g. an existing Pantheon site has its add-on hook upgraded.
+      // Update mode: keep all configured values and skip the prompts. Infer
+      // prior choices from the existing config so the generated scaffolding and
+      // hooks can be refreshed in place — e.g. an existing Pantheon site has its
+      // add-on hook upgraded.
       // Rename legacy Pantheon env vars before detection so sites configured
       // prior to the DDEV_ prefix switch are recognised and refreshed.
       $config = static::migratePantheonEnv($config);
@@ -139,8 +305,13 @@ class Ddev {
       $io->info('<info>Update mode: configuration left untouched; rebuilding scaffolding.</info>');
     }
     else {
-      $clientCode = $io->ask('<info>Client code?</info>:' . "\n > ");
-      $phpVersion = static::selectPhpVersion($event);
+      // Seed each prompt's default from the existing config so re-running to
+      // change one value never silently drops the rest — pressing enter keeps
+      // the current value. On a first-time setup these fall back to empties/ddev
+      // defaults.
+      $nameDefault = $config['name'] ?? NULL;
+      $clientCode = $io->ask('<info>Client code?</info>' . ($nameDefault ? '  [<comment>' . $nameDefault . '</comment>]' : '') . ':' . "\n > ", $nameDefault);
+      $phpVersion = static::selectPhpVersion($event, $config['php_version'] ?? '8.3');
 
       $config = static::configureSite($config, $clientCode, $phpVersion);
       $config = static::configurePantheon($event, $config, $clientCode, $phpVersion);
@@ -165,15 +336,19 @@ class Ddev {
     static::appendGitignore($event);
     static::copyBrowsersync($event);
 
-    if ($update && static::fingerprint() !== $before) {
-      // Something changed. The add-on pull and container rebuilds happen on the
-      // host at start, which this in-container script can't trigger, so prompt a
-      // restart to re-run the post-start hooks (e.g. ddev add-on get). When the
-      // refresh was a no-op (fingerprint unchanged) we stay silent.
-      $io->write('');
-      $io->write('<info>Scaffolding refreshed.</info> Run <comment>ddev restart</comment> to rebuild the containers and re-pull add-ons (e.g. ddev-pantheon-db).');
-      $io->write('');
+    // Close with an honest status. This runs in the web container and can't
+    // trigger `ddev restart` itself (ddev is a host binary, and the in-container
+    // ddev is a no-op stub), so when a managed file changed we tell the dev to
+    // restart; when nothing did, we say so. A fresh setup always counts as
+    // changed; update mode only when the fingerprint actually moved.
+    $io->write('');
+    if (!$update || static::fingerprint() !== $before) {
+      $io->write('<info>Scaffolding refreshed — run</info> <comment>ddev restart</comment> <info>to acquire the changes (rebuild containers, re-pull add-ons).</info>');
     }
+    else {
+      $io->write('<info>Everything up-to-date.</info>');
+    }
+    $io->write('');
   }
 
   /**
@@ -182,7 +357,7 @@ class Ddev {
    * @return string
    *   The selected PHP version (e.g. "8.3").
    */
-  protected static function selectPhpVersion(Event $event) {
+  protected static function selectPhpVersion(Event $event, $default = '8.3') {
     $phpVersions = [
       '7.4',
       '8.1',
@@ -190,7 +365,10 @@ class Ddev {
       '8.3',
       '8.4',
     ];
-    $phpIndex = $event->getIO()->select('<info>PHP version</info> [<comment>8.3</comment>]:', $phpVersions, '8.3');
+    if (!in_array($default, $phpVersions, TRUE)) {
+      $default = '8.3';
+    }
+    $phpIndex = $event->getIO()->select('<info>PHP version</info> [<comment>' . $default . '</comment>]:', $phpVersions, $default);
     return $phpVersions[$phpIndex];
   }
 
@@ -201,7 +379,12 @@ class Ddev {
    *   The updated configuration.
    */
   protected static function configureSite(array $config, $clientCode, $phpVersion) {
-    $config['name'] = $clientCode;
+    // Guard the name: an empty client code (e.g. a prompt answered with enter,
+    // or a non-interactive run) must never overwrite an existing name. A
+    // first-time setup legitimately starts empty and gets its name set here.
+    if ($clientCode !== NULL && $clientCode !== '') {
+      $config['name'] = $clientCode;
+    }
     $config['docroot'] = '';
     $config['type'] = 'wordpress';
     $config['php_version'] = $phpVersion;
@@ -220,15 +403,25 @@ class Ddev {
    */
   protected static function configurePantheon(Event $event, array $config, $clientCode, $phpVersion) {
     $io = $event->getIO();
+    [$existingSite, $existingEnv] = static::pantheonEnvValues($config);
 
-    if (!$io->askConfirmation('<info>Is this site hosted on Pantheon?</info> [<comment>Y/n</comment>] ', TRUE)) {
+    // Default the confirmation from the site's current state: an already-Pantheon
+    // site defaults to yes, a configured non-Pantheon one to no. A brand-new
+    // setup has neither, so default to yes (the common case for these sites).
+    $default = static::isConfigured() ? static::isPantheonSite($config) : TRUE;
+    $hint = $default ? '[<comment>Y/n</comment>]' : '[<comment>y/N</comment>]';
+    if (!$io->askConfirmation('<info>Is this site hosted on Pantheon?</info> ' . $hint . ' ', $default)) {
       // Non-Pantheon: drop any stale Terminus build artifact.
       (new Filesystem())->remove(static::$ddevRoot . 'web-build/Dockerfile.ddev-terminus');
       return $config;
     }
 
-    $siteName = $io->ask('<info>Pantheon site name</info> [<comment>' . 'aai' . $clientCode . '</comment>]:' . "\n > ", 'aai' . $clientCode);
-    $siteEnv = $io->ask('<info>Pantheon site environment (dev|test|live)</info> [<comment>live</comment>]:' . "\n > ", 'live');
+    // Seed from the existing env vars on a re-run; otherwise derive the usual
+    // 'aai'<client-code> guess for a first-time setup.
+    $siteDefault = $existingSite ?: 'aai' . $clientCode;
+    $envDefault = $existingEnv ?: 'live';
+    $siteName = $io->ask('<info>Pantheon site name</info> [<comment>' . $siteDefault . '</comment>]:' . "\n > ", $siteDefault);
+    $siteEnv = $io->ask('<info>Pantheon site environment (dev|test|live)</info> [<comment>' . $envDefault . '</comment>]:' . "\n > ", $envDefault);
 
     $config['web_environment'] = [
       'DDEV_PANTHEON_SITE=' . $siteName,
@@ -240,6 +433,32 @@ class Ddev {
     static::downgradeTerminus($event, $phpVersion);
 
     return $config;
+  }
+
+  /**
+   * Pull the current Pantheon site/environment out of web_environment.
+   *
+   * Seeds the Pantheon prompts so a re-run defaults to the existing values
+   * rather than re-deriving a guess from the client code.
+   *
+   * @param array $config
+   *   The current site configuration.
+   *
+   * @return array
+   *   A [site, environment] pair; either element is NULL when not present.
+   */
+  protected static function pantheonEnvValues(array $config) {
+    $site = NULL;
+    $env = NULL;
+    foreach ($config['web_environment'] ?? [] as $var) {
+      if (strpos($var, 'DDEV_PANTHEON_SITE=') === 0) {
+        $site = substr($var, strlen('DDEV_PANTHEON_SITE='));
+      }
+      elseif (strpos($var, 'DDEV_PANTHEON_ENVIRONMENT=') === 0) {
+        $env = substr($var, strlen('DDEV_PANTHEON_ENVIRONMENT='));
+      }
+    }
+    return [$site, $env];
   }
 
   /**
