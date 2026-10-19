@@ -13,7 +13,7 @@
         "php": ">=7",
         "symfony/yaml": "^4.4 || ^5.4 || ^6.4 || ^7.0",
         "symfony/filesystem": "^4.4 || ^5.4 || ^6.4 || ^7.0",
-        "drupal/core-composer-scaffold": "^9 || ^10 || ^11"
+        "drupal/core-composer-scaffold": "^9 || ^10 || >=11.0 <11.3"
     },
     "require-dev": {
         "phpunit/phpunit": "^10"
