@@ -1,8 +1,13 @@
 #!/bin/bash
 
-## Description: Run gulp inside the web container
+## Description: Run gulp in the theme (wp-content/themes/ash-child, or $DDEV_THEME_DIR)
 ## Usage: gulp [flags] [args]
-## Example: "ddev gulp --version"
+## Example: "ddev gulp" or "ddev gulp watch"
 ## ExecRaw: true
 
-gulp -f="web/themes/ash/gulpfile.js" "$@"
+theme="${DDEV_THEME_DIR:-wp-content/themes/ash-child}"
+if [ ! -f "/var/www/html/$theme/gulpfile.js" ]; then
+  echo "No gulpfile.js in $theme. Set DDEV_THEME_DIR in web_environment to the theme path."
+  exit 1
+fi
+cd "/var/www/html/$theme" && npx gulp "$@"

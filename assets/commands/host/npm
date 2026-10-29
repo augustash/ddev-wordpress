@@ -1,8 +1,9 @@
 #!/bin/bash
 
-## Description: Run npm inside the web container in the root of the project (Use --prefix for another directory)
+## Description: Run npm in the theme (wp-content/themes/ash-child, or $DDEV_THEME_DIR)
 ## Usage: npm [flags] [args]
-## Example: "ddev npm install" or "ddev npm install learna" or "ddev npm --prefix ./web/core/ install learna"
+## Example: "ddev npm ci" or "ddev npm install -D gulp-concat"
 
-ddev exec --raw bash -ic "npm --prefix ./web/themes/ash $@"
+# DDEV_THEME_DIR lives in the container's environment, so resolve it there.
+ddev exec --raw bash -c 'cd "/var/www/html/${DDEV_THEME_DIR:-wp-content/themes/ash-child}" && npm "$@"' npm "$@"
 ddev mutagen sync 2>/dev/null

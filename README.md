@@ -64,6 +64,24 @@ These are used to set config.yaml ddev configuration. On a re-run each prompt is
 pre-filled with the project's current value, so pressing enter through them keeps
 the existing configuration unchanged.
 
+# Theme commands
+
+`ddev npm` and `ddev gulp` run in `wp-content/themes/ash-child`:
+```bash
+ddev npm ci        # install the theme's packages
+ddev gulp          # build once
+ddev gulp watch    # rebuild on change
+```
+
+For a different theme, set its path in `.ddev/config.yaml`:
+```yaml
+web_environment:
+  - DDEV_THEME_DIR=wp-content/themes/<theme>
+```
+
+Node comes from ddev (`nodejs_version` in `config.yaml`, which accepts any version
+such as `"18"`); ddev no longer ships nvm, so `ddev nvm` is gone.
+
 # Database
 
 Database pull is handled by the [ddev-pantheon-db](https://github.com/augustash/ddev-pantheon-db) add-on, which is automatically installed on `ddev start`.

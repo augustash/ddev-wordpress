@@ -1267,6 +1267,17 @@ class Ddev {
         $fileSystem->remove($dbCommand);
       }
     }
+
+    // ddev no longer ships nvm (nodejs_version replaces it), so the nvm command
+    // we used to scaffold only errors. Scaffold never deletes a file it stops
+    // mapping, so remove our copy; a dev's edited one is left alone.
+    $nvmCommand = static::$ddevRoot . 'commands/web/nvm';
+    if ($fileSystem->exists($nvmCommand)) {
+      $contents = file_get_contents($nvmCommand);
+      if (strpos($contents, '## Description: Run nvm inside the web container') !== FALSE && strpos($contents, "\nnvm \"\$@\"") !== FALSE) {
+        $fileSystem->remove($nvmCommand);
+      }
+    }
   }
 
   /**

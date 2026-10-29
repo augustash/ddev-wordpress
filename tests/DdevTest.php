@@ -95,6 +95,39 @@ final class DdevTest extends DdevTestCase {
   }
 
   // ---------------------------------------------------------------------------
+  // cleanup(): the retired nvm command
+  // ---------------------------------------------------------------------------
+
+  public function testCleanupRemovesShippedNvmCommand(): void {
+    $dir = $this->setConfigDir();
+    $this->setManagedRoots($dir);
+    $nvm = $dir . '/commands/web/nvm';
+    mkdir(dirname($nvm), 0777, TRUE);
+    file_put_contents($nvm, "#!/bin/bash -i\n\n## Description: Run nvm inside the web container\n## Usage: nvm [flags] [args]\n## Example: \"ddev nvm install 6\"\n## ExecRaw: true\n\nnvm \"\$@\"\n");
+
+    self::call('cleanup');
+
+    $this->assertFileDoesNotExist($nvm);
+    rmdir($dir . '/commands/web');
+    rmdir($dir . '/commands');
+  }
+
+  public function testCleanupKeepsEditedNvmCommand(): void {
+    $dir = $this->setConfigDir();
+    $this->setManagedRoots($dir);
+    $nvm = $dir . '/commands/web/nvm';
+    mkdir(dirname($nvm), 0777, TRUE);
+    file_put_contents($nvm, "#!/bin/bash\n\n## Description: Run the site's own nvm\n\nsource ~/.nvm/nvm.sh && nvm \"\$@\"\n");
+
+    self::call('cleanup');
+
+    $this->assertFileExists($nvm);
+    unlink($nvm);
+    rmdir($dir . '/commands/web');
+    rmdir($dir . '/commands');
+  }
+
+  // ---------------------------------------------------------------------------
   // Entry-point seams: argsRequestUpdate() + isConfigured() + isDdevContext()
   //
   // argsRequestUpdate backs the unadvertised `update` override; isConfigured
